@@ -44,6 +44,9 @@ pub fn handle_cancel_listing(ctx: Context<CancelListing>) -> Result<()> {
                 // Manual lamport transfer instead of CPI since vault is owned by the program
                 **ctx.accounts.escrow_vault.to_account_info().try_borrow_mut_lamports()? -= amount;
                 **ctx.accounts.seller.to_account_info().try_borrow_mut_lamports()? += amount;
+                
+                // Assign to SystemProgram so the zero-balance account can be securely purged
+                ctx.accounts.escrow_vault.to_account_info().assign(&system_program::ID);
             }
         }
         _ => return Err(ErrorCode::InvalidStatus.into()),

@@ -42,7 +42,7 @@ CREATE TABLE IF NOT EXISTS admin_whitelist (
 
 -- Seed initial admin from contract constants
 INSERT INTO admin_whitelist (wallet_pubkey, role)
-VALUES ('EjhkjCLXe6aPg1zpSi9ihJemo4JvYVacQzSi8Nbczytp', 'admin')
+VALUES ('<ADMIN_WALLET_PUBKEY>', 'admin')
 ON CONFLICT (wallet_pubkey) DO NOTHING;
 
 -- 2. LISTINGS TABLE
@@ -56,6 +56,8 @@ CREATE TABLE IF NOT EXISTS listings (
     category TEXT,
     price_sol NUMERIC(18, 9) NOT NULL,
     price_usd NUMERIC(12, 2),
+    image TEXT,
+    image_url TEXT,
     data_hash TEXT NOT NULL,
     encrypted_credentials TEXT NOT NULL,
     encryption_iv TEXT,
@@ -148,13 +150,13 @@ CREATE POLICY "Public read for listed items"
 -- 2. Sellers can view all their own listings (Drafts, Listed, InEscrow, etc.)
 CREATE POLICY "Sellers can view own listings"
     ON listings FOR SELECT
-    USING (seller_pubkey = (current_setting('request.headers', true)::json ->> 'x-wallet-address'));
+    USING (seller_pubkey = (auth.jwt() ->> 'wallet_address'));
 
 -- 3. Buyers can view listings they have purchased in Escrow, Dispute or Completed
 CREATE POLICY "Buyers can view their escrows"
     ON listings FOR SELECT
     USING (
-        buyer_pubkey = (current_setting('request.headers', true)::json ->> 'x-wallet-address')
+        buyer_pubkey = (auth.jwt() ->> 'wallet_address')
         AND status IN ('InEscrow', 'InDispute', 'Completed')
     );
 
@@ -167,7 +169,7 @@ CREATE POLICY "Sellers can insert listings"
 CREATE POLICY "Sellers can update drafts"
     ON listings FOR UPDATE
     USING (
-        seller_pubkey = (current_setting('request.headers', true)::json ->> 'x-wallet-address')
+        seller_pubkey = (auth.jwt() ->> 'wallet_address')
         AND status = 'Draft'
     );
 
@@ -181,13 +183,13 @@ CREATE POLICY "Service role full access on listings"
 CREATE POLICY "Parties can view dispute"
     ON disputes FOR SELECT
     USING (
-        initiator_pubkey = (current_setting('request.headers', true)::json ->> 'x-wallet-address')
+        initiator_pubkey = (auth.jwt() ->> 'wallet_address')
         OR EXISTS (
             SELECT 1 FROM listings l
             WHERE l.id = disputes.listing_id
             AND (
-                l.seller_pubkey = (current_setting('request.headers', true)::json ->> 'x-wallet-address')
-                OR l.buyer_pubkey = (current_setting('request.headers', true)::json ->> 'x-wallet-address')
+                l.seller_pubkey = (auth.jwt() ->> 'wallet_address')
+                OR l.buyer_pubkey = (auth.jwt() ->> 'wallet_address')
             )
         )
     );
@@ -198,7 +200,7 @@ CREATE POLICY "Admins can view all disputes"
     USING (
         EXISTS (
             SELECT 1 FROM admin_whitelist aw
-            WHERE aw.wallet_pubkey = (current_setting('request.headers', true)::json ->> 'x-wallet-address')
+            WHERE aw.wallet_pubkey = (auth.jwt() ->> 'wallet_address')
         )
     );
 
@@ -219,7 +221,7 @@ CREATE POLICY "Sellers can update dispute response"
         EXISTS (
             SELECT 1 FROM listings l
             WHERE l.id = disputes.listing_id
-            AND l.seller_pubkey = (current_setting('request.headers', true)::json ->> 'x-wallet-address')
+            AND l.seller_pubkey = (auth.jwt() ->> 'wallet_address')
         )
     );
 
@@ -229,7 +231,7 @@ CREATE POLICY "Admins can update all disputes"
     USING (
         EXISTS (
             SELECT 1 FROM admin_whitelist aw
-            WHERE aw.wallet_pubkey = (current_setting('request.headers', true)::json ->> 'x-wallet-address')
+            WHERE aw.wallet_pubkey = (auth.jwt() ->> 'wallet_address')
         )
     );
 
@@ -245,6 +247,8 @@ SELECT
     category,
     price_sol,
     price_usd,
+    image,
+    image_url,
     data_hash,
     status,
     escrow_pda,

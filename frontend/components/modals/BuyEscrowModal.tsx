@@ -26,6 +26,8 @@ export function BuyEscrowModal({ isOpen, onClose, listing }: BuyEscrowModalProps
 
   if (!isOpen || !listing) return null;
 
+  if (!isOpen || !listing) return null;
+
   const feeSol = +(listing.price_sol * 0.01).toFixed(3);
   const totalSol = +(listing.price_sol + feeSol).toFixed(3);
 
@@ -56,8 +58,50 @@ export function BuyEscrowModal({ isOpen, onClose, listing }: BuyEscrowModalProps
       tx.recentBlockhash = latestBlockhash.blockhash;
       tx.feePayer = publicKey;
 
-      // 3. Cüzdan imzalama ve Ağ İşlemi
-      const signature = await sendTransaction(tx, connection);
+      // Manuel simülasyon yapıp hatayı konsola yazdıralım
+      try {
+        const simResult = await connection.simulateTransaction(tx);
+        console.log("[BuyEscrow] Simulation result:", simResult.value);
+        if (simResult.value.err) {
+            console.error("[BuyEscrow] Simulation failed with error:", simResult.value.err);
+            console.error("[BuyEscrow] Simulation logs:", simResult.value.logs);
+        }
+      } catch (simErr) {
+        console.error("[BuyEscrow] Error running manual simulation:", simErr);
+      }
+
+      // 3. Phantom "disconnected port" hatasına karşı retry mekanizması
+      let signature: string | null = null;
+      let lastErr: any = null;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          if (attempt > 0) {
+            const freshBlockhash = await connection.getLatestBlockhash('confirmed');
+            tx.recentBlockhash = freshBlockhash.blockhash;
+          }
+          signature = await sendTransaction(tx, connection);
+          lastErr = null;
+          break; // Başarılı, döngüden çık
+        } catch (walletErr: any) {
+          lastErr = walletErr;
+          const msg = (walletErr?.message || '').toLowerCase();
+          if (
+            msg.includes('disconnected') ||
+            msg.includes('unexpected error') ||
+            msg.includes('failed to send message') ||
+            msg.includes('port')
+          ) {
+            console.warn(`[BuyEscrow] Phantom port error, retrying (attempt ${attempt + 1}/3)...`);
+            await new Promise((r) => setTimeout(r, 800)); // Phantom'ın yeniden bağlanması için bekle
+            continue;
+          }
+          throw walletErr; // Diğer hataları (kullanıcı reddi gibi) direkt fırlat
+        }
+      }
+
+      if (!signature) {
+        throw lastErr || new Error('Transaction could not be sent after 3 attempts. Please open Phantom and try again.');
+      }
 
       // 4. Blokzincir Onayı Bekle
       await connection.confirmTransaction({

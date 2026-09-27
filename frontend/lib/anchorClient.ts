@@ -12,6 +12,7 @@ export const PROGRAM_ID = new PublicKey(PROGRAM_ID_STR);
 
 const ADMIN_PUBKEY_STR = process.env.NEXT_PUBLIC_ADMIN_PUBKEY || "EjhkjCLXe6aPg1zpSi9ihJemo4JvYVacQzSi8Nbczytp";
 export const ADMIN_PUBKEY = new PublicKey(ADMIN_PUBKEY_STR);
+export const TREASURY_PUBKEY = new PublicKey(ADMIN_PUBKEY_STR);
 
 export const LISTING_SEED = Buffer.from("listing");
 export const VAULT_SEED = Buffer.from("vault");
@@ -155,6 +156,7 @@ export async function buildReleaseFundsInstruction(
       listingAccount: listingPda,
       seller: seller,
       escrowVault: vaultPda,
+      treasury: TREASURY_PUBKEY,
       buyer: buyer,
       systemProgram: SystemProgram.programId,
     })
@@ -179,6 +181,7 @@ export async function buildResolveDisputeInstruction(
       listingAccount: listingPda,
       winner: winner,
       escrowVault: vaultVaultPda,
+      treasury: TREASURY_PUBKEY,
       admin: admin,
       systemProgram: SystemProgram.programId,
     })

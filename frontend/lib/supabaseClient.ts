@@ -51,15 +51,23 @@ const supabaseAnonKey =
 export const supabase = createClient(supabaseUrl, supabaseAnonKey);
 
 /**
- * Creates a Supabase client that injects the user's wallet address into the headers
+ * Creates a Supabase client that injects the user's JWT into the headers
  * so that Row Level Security (RLS) policies can correctly identify the user.
  */
-export function getAuthClient(walletPubkey?: string) {
-  if (!walletPubkey) return supabase;
+export function getAuthClient(jwtToken?: string) {
+  if (!jwtToken) {
+    // Attempt to get token from localStorage if not provided
+    if (typeof window !== 'undefined') {
+      jwtToken = localStorage.getItem('gamer_escrow_jwt') || undefined;
+    }
+  }
+  
+  if (!jwtToken) return supabase;
+  
   return createClient(supabaseUrl, supabaseAnonKey, {
     global: {
       headers: {
-        "x-wallet-address": walletPubkey,
+        Authorization: `Bearer ${jwtToken}`,
       },
     },
   });
@@ -92,7 +100,7 @@ export async function fetchMarketplaceListings(): Promise<ListingRecord[]> {
  */
 export async function fetchSellerListings(sellerPubkey: string): Promise<ListingRecord[]> {
   try {
-    const client = getAuthClient(sellerPubkey);
+    const client = getAuthClient();
     const { data, error } = await client
       .from("listings")
       .select("*")
@@ -115,7 +123,7 @@ export async function fetchSellerListings(sellerPubkey: string): Promise<Listing
  */
 export async function fetchBuyerOrders(buyerPubkey: string): Promise<ListingRecord[]> {
   try {
-    const client = getAuthClient(buyerPubkey);
+    const client = getAuthClient();
     const { data, error } = await client
       .from("listings")
       .select("*")
@@ -162,7 +170,7 @@ export async function createListingRecord(
   payload: Omit<ListingRecord, "id" | "created_at" | "updated_at">
 ): Promise<ListingRecord | null> {
   try {
-    const client = getAuthClient(payload.seller_pubkey);
+    const client = getAuthClient();
     const { data, error } = await client
       .from("listings")
       .insert([payload])
@@ -240,7 +248,7 @@ export async function checkIsAdmin(walletPubkey: string): Promise<boolean> {
   try {
     // Cüzdan adresindeki olası boşlukları temizle
     const cleanPubkey = walletPubkey.trim();
-    const client = getAuthClient(cleanPubkey);
+    const client = getAuthClient();
 
     const { data, error } = await client
       .from("admin_whitelist")
@@ -268,7 +276,7 @@ export async function fetchDisputes(
   isAdmin: boolean = false
 ): Promise<DisputeRecord[]> {
   try {
-    const client = getAuthClient(walletPubkey);
+    const client = getAuthClient();
     let query = client.from("disputes").select("*, listings(*)");
 
     if (!isAdmin && walletPubkey) {
@@ -294,7 +302,7 @@ export async function createDisputeRecord(
   payload: Omit<DisputeRecord, "id" | "created_at" | "updated_at">
 ): Promise<DisputeRecord | null> {
   try {
-    const client = getAuthClient(payload.initiator_pubkey);
+    const client = getAuthClient();
     const { data, error } = await client
       .from("disputes")
       .insert([payload])
@@ -326,7 +334,7 @@ export async function updateDisputeSellerResponse(
   walletPubkey?: string
 ): Promise<boolean> {
   try {
-    const client = getAuthClient(walletPubkey);
+    const client = getAuthClient();
     const { error } = await client
       .from("disputes")
       .update({
@@ -355,7 +363,7 @@ export async function fetchDisputesByListing(
   walletPubkey?: string
 ): Promise<DisputeRecord | null> {
   try {
-    const client = getAuthClient(walletPubkey);
+    const client = getAuthClient();
     const { data, error } = await client
       .from("disputes")
       .select("*")

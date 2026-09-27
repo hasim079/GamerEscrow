@@ -6,6 +6,8 @@ import { WalletModalProvider } from '@solana/wallet-adapter-react-ui';
 import { PhantomWalletAdapter } from '@solana/wallet-adapter-phantom';
 import '@solana/wallet-adapter-react-ui/styles.css';
 
+import { AuthProvider } from './AuthProvider';
+
 export function SolanaProvider({ children }: { children: React.ReactNode }) {
   const endpoint = "https://api.devnet.solana.com";
   
@@ -19,7 +21,9 @@ export function SolanaProvider({ children }: { children: React.ReactNode }) {
   return (
     <ConnectionProvider endpoint={endpoint}>
       <WalletProvider wallets={wallets} autoConnect>
-        <WalletModalProvider>{children}</WalletModalProvider>
+        <WalletModalProvider>
+          <AuthProvider>{children}</AuthProvider>
+        </WalletModalProvider>
       </WalletProvider>
     </ConnectionProvider>
   );

@@ -32,6 +32,9 @@ pub fn handle_buy_item(ctx: Context<BuyItem>) -> Result<()> {
     require_keys_eq!(expected_vault, ctx.accounts.escrow_vault.key());
     require!(expected_bump == listing.vault_bump, ErrorCode::InvalidStatus);
 
+    let buyer_fee = (listing.price as u128 * crate::constants::BUYER_FEE_BPS as u128 / 10000) as u64;
+    let total_to_transfer = listing.price.checked_add(buyer_fee).unwrap();
+
     anchor_lang::system_program::transfer(
         CpiContext::new(
             ctx.accounts.system_program.key(),
@@ -40,7 +43,7 @@ pub fn handle_buy_item(ctx: Context<BuyItem>) -> Result<()> {
                 to: ctx.accounts.escrow_vault.to_account_info(),
             },
         ),
-        listing.price,
+        total_to_transfer,
     )?;
 
     listing.buyer = Some(ctx.accounts.buyer.key());
