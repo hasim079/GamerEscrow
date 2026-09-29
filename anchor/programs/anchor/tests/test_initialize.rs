@@ -26,6 +26,15 @@ fn test_create_listing() {
         &program_id,
     )
     .0;
+    let vault = Pubkey::find_program_address(
+        &[
+            anchor::constants::VAULT_SEED,
+            listing.as_ref(),
+        ],
+        &program_id,
+    )
+    .0;
+    
     let mut svm = LiteSVM::new();
     let bytes = include_bytes!(concat!(
         env!("CARGO_TARGET_TMPDIR"),
@@ -43,6 +52,7 @@ fn test_create_listing() {
         .data(),
         anchor::accounts::CreateListing {
             listing_account: listing,
+            escrow_vault: vault,
             seller: payer.pubkey(),
             system_program: system_program::ID,
         }

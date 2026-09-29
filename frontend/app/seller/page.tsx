@@ -26,12 +26,22 @@ export default function SellerDashboardPage() {
   useEffect(() => {
     async function load() {
       if (publicKey) {
-        const list = await fetchSellerListings(publicKey.toBase58());
-        setDbListings(list || []);
+        try {
+          const list = await fetchSellerListings(publicKey.toBase58());
+          setDbListings(list || []);
+        } catch (err) {
+          console.error("Error fetching seller listings:", err);
+        }
       }
       setLoading(false);
     }
+    
+    // Initial load
     load();
+
+    // Poll every 3 seconds
+    const interval = setInterval(load, 3000);
+    return () => clearInterval(interval);
   }, [publicKey]);
 
   const handlePublish = (draft: ListingRecord) => {

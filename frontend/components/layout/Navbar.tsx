@@ -15,7 +15,7 @@ export function Navbar() {
   const [copiedAddress, setCopiedAddress] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
-  // Solana Wallet Adapter'dan gelen gerçek veriler ve fonksiyonlar
+  // Real data and functions from Solana Wallet Adapter
   const { publicKey, connected, disconnect } = useWallet();
 
   const navItems = [
@@ -34,7 +34,7 @@ export function Navbar() {
     return pathname === href;
   };
 
-  // Gerçek cüzdan adresini kısaltma ve kopyalama işlemleri
+  // Actual wallet address truncation and copying logic
   const base58Address = publicKey ? publicKey.toBase58() : '';
   const walletAddress = base58Address ? `${base58Address.slice(0, 4)}...${base58Address.slice(-4)}` : '';
 

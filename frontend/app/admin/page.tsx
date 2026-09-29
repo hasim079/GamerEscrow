@@ -3,10 +3,11 @@
 import React, { useState, useEffect } from 'react';
 import { Eye, Shield, CheckCircle2, X, AlertTriangle, LogIn } from 'lucide-react';
 import { useConnection, useWallet } from '@solana/wallet-adapter-react';
-import { PublicKey, Transaction } from '@solana/web3.js';
+import { PublicKey } from '@solana/web3.js';
 import { checkIsAdmin, fetchDisputes, supabase, updateListingStatus } from '../../lib/supabaseClient';
 import type { Session } from '@supabase/supabase-js';
 import { buildResolveDisputeInstruction } from '../../lib/anchorClient';
+import { buildAndSendVersionedTx } from '../../lib/txUtils';
 
 export interface DisputeItem {
   id: string;
@@ -114,52 +115,66 @@ export default function AdminPage() {
     setIsProcessing(true);
     setResolutionMessage(null);
     try {
-      if (publicKey && sendTransaction) {
-        let winnerKey: PublicKey;
-        let listingKey: PublicKey;
-
-        try {
-          const winnerAddress = action === 'Refund Buyer' ? selectedDispute.buyerAddress : selectedDispute.sellerAddress;
-          if (!winnerAddress) throw new Error("Winner's wallet address is missing (Database error).");
-          winnerKey = new PublicKey(winnerAddress);
-
-          if (!selectedDispute.vaultAddress || selectedDispute.vaultAddress.length < 32) {
-            throw new Error("No valid Escrow (Listing PDA) address found. Transaction cannot be sent on-chain.");
-          }
-          listingKey = new PublicKey(selectedDispute.vaultAddress);
-        } catch (pubkeyErr: any) {
-          alert(`Address verification error: ${pubkeyErr.message}`);
-          setIsProcessing(false);
-          return;
-        }
-
-        try {
-          const winnerIsBuyer = action === 'Refund Buyer';
-          const ix = await buildResolveDisputeInstruction(publicKey, winnerKey, listingKey, winnerIsBuyer);
-          const tx = new Transaction().add(ix);
-          const latest = await connection.getLatestBlockhash('confirmed');
-          tx.recentBlockhash = latest.blockhash;
-          tx.feePayer = publicKey;
-
-          await sendTransaction(tx, connection);
-          
-          // Update DB Statuses
-          const newListingStatus = action === 'Refund Buyer' ? 'Cancelled' : 'Completed';
-          const newDisputeStatus = action === 'Refund Buyer' ? 'Resolved_Refunded' : 'Resolved_Released';
-          
-          await updateListingStatus(selectedDispute.listingId, newListingStatus as any);
-          await supabase.from('disputes').update({ status: newDisputeStatus }).eq('id', selectedDispute.id);
-
-          const newUiStatus = action === 'Refund Buyer' ? 'Resolved - Refunded' : 'Resolved - Released';
-          const updated = { ...selectedDispute, status: newUiStatus as any };
-          setDisputes((prev) => prev.map((d) => (d.id === updated.id ? updated : d)));
-          setSelectedDispute(updated);
-          setResolutionMessage(`Dispute resolved successfully on-chain: ${action}`);
-        } catch (chainErr: any) {
-          console.error('On-chain transaction error:', chainErr);
-          alert(`Solana Transaction Error: ${chainErr.message || 'An unknown error occurred.'}`);
-        }
+      if (!publicKey || !sendTransaction) {
+        alert('Admin wallet is not connected.');
+        return;
       }
+
+      const winnerAddress = action === 'Refund Buyer'
+        ? selectedDispute.buyerAddress
+        : selectedDispute.sellerAddress;
+      if (!winnerAddress) throw new Error("Winning wallet address missing (Database error).");
+
+      let winnerKey: PublicKey;
+      try {
+        winnerKey = new PublicKey(winnerAddress);
+      } catch {
+        throw new Error(`Invalid winner address: ${winnerAddress}`);
+      }
+
+      if (!selectedDispute.vaultAddress || selectedDispute.vaultAddress.length < 32) {
+        throw new Error('Valid Listing PDA address not found. Transaction cannot be sent.');
+      }
+      let listingKey: PublicKey;
+      try {
+        listingKey = new PublicKey(selectedDispute.vaultAddress);
+      } catch {
+        throw new Error(`Invalid Listing PDA address: ${selectedDispute.vaultAddress}`);
+      }
+
+      const winnerIsBuyer = action === 'Refund Buyer';
+      const ix = await buildResolveDisputeInstruction(publicKey, winnerKey, listingKey, winnerIsBuyer);
+
+      const { signature, latestBlockhash } = await buildAndSendVersionedTx(
+        connection,
+        publicKey,
+        sendTransaction as any,
+        [ix],
+        400_000
+      );
+
+      const confirmation = await connection.confirmTransaction(
+        { signature, blockhash: latestBlockhash.blockhash, lastValidBlockHeight: latestBlockhash.lastValidBlockHeight },
+        'confirmed'
+      );
+      if (confirmation.value.err) {
+        throw new Error('Transaction failed on blockchain: ' + JSON.stringify(confirmation.value.err));
+      }
+
+      const newListingStatus = winnerIsBuyer ? 'Cancelled' : 'Completed';
+      const newDisputeStatus = winnerIsBuyer ? 'Resolved_Refunded' : 'Resolved_Released';
+
+      await updateListingStatus(selectedDispute.listingId, newListingStatus as any);
+      await supabase.from('disputes').update({ status: newDisputeStatus }).eq('id', selectedDispute.id);
+
+      const newUiStatus = winnerIsBuyer ? 'Resolved - Refunded' : 'Resolved - Released';
+      const updated = { ...selectedDispute, status: newUiStatus as any };
+      setDisputes((prev) => prev.map((d) => (d.id === updated.id ? updated : d)));
+      setSelectedDispute(updated);
+      setResolutionMessage(`Dispute successfully resolved: ${action}`);
+    } catch (chainErr: any) {
+      console.error('Admin transaction error:', chainErr);
+      alert(`Solana Transaction Error: ${chainErr.message || 'An unknown error occurred.'}`);
     } finally {
       setIsProcessing(false);
     }
@@ -243,9 +258,9 @@ export default function AdminPage() {
     );
   }
 
+
   return (
     <div className="mx-auto max-w-6xl px-4 py-8 sm:px-6">
-      {/* Header */}
       <div className="mb-6">
         <div className="flex items-center gap-3">
           <h1 className="text-2xl sm:text-3xl font-bold tracking-tight text-foreground">Admin Panel</h1>
@@ -258,7 +273,6 @@ export default function AdminPage() {
         </p>
       </div>
 
-      {/* Tabs */}
       <div className="mb-6 flex items-center gap-2 border-b border-border pb-3">
         <button
           type="button"
@@ -295,7 +309,6 @@ export default function AdminPage() {
         </button>
       </div>
 
-      {/* Disputes Tab */}
       {activeTab === 'disputes' && (
         <div className="rounded-2xl border border-border bg-card overflow-hidden shadow-sm">
           <div className="overflow-x-auto">
@@ -372,7 +385,6 @@ export default function AdminPage() {
         </div>
       )}
 
-      {/* Analytics Tab */}
       {activeTab === 'analytics' && (
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-5">
           <div className="rounded-2xl border border-border bg-card p-5">
@@ -399,7 +411,6 @@ export default function AdminPage() {
         </div>
       )}
 
-      {/* Moderation Tab */}
       {activeTab === 'moderation' && (
         <div className="rounded-2xl border border-border bg-card p-6">
           <h3 className="text-sm font-bold text-foreground mb-2">Automated Vault Safeguards</h3>
@@ -413,7 +424,6 @@ export default function AdminPage() {
         </div>
       )}
 
-      {/* Inspect Modal */}
       {selectedDispute && (
         <div className="ge-modal-backdrop animate-in" onClick={() => setSelectedDispute(null)}>
           <div className="ge-modal max-w-3xl max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>

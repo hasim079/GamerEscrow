@@ -2,8 +2,9 @@
 
 import React, { useState, useEffect } from 'react';
 import { fetchBuyerOrders, ListingRecord, updateListingStatus } from '../../lib/supabaseClient';
-import { Transaction, PublicKey } from '@solana/web3.js';
+import { PublicKey } from '@solana/web3.js';
 import { buildReleaseFundsInstruction, buildOpenDisputeInstruction } from '../../lib/anchorClient';
+import { buildAndSendVersionedTx } from '../../lib/txUtils';
 import { Stepper } from '../../components/ui/Stepper';
 import { CountdownTimer } from '../../components/ui/CountdownTimer';
 import { DecryptBox } from '../../components/ui/DecryptBox';
@@ -24,12 +25,35 @@ export default function OrdersPage() {
 
   useEffect(() => {
     if (!publicKey) { setLoading(false); return; }
-    fetchBuyerOrders(publicKey.toBase58()).then((orders) => {
-      const active = orders.filter((o) => o.status === 'InEscrow' || o.status === 'InDispute' || o.status === 'Completed');
-      setOrdersList(active);
-      if (active.length > 0) setSelectedOrder(active[0]);
-      setLoading(false);
-    });
+    
+    const loadOrders = async () => {
+      try {
+        const orders = await fetchBuyerOrders(publicKey.toBase58());
+        const active = orders.filter((o) => o.status === 'InEscrow' || o.status === 'InDispute' || o.status === 'Completed');
+        setOrdersList(active);
+        
+        // Only auto-select the first order if none is selected
+        setSelectedOrder((prev) => {
+          if (!prev && active.length > 0) return active[0];
+          // If we already have a selected order, update its data
+          if (prev) {
+            const updated = active.find(o => o.id === prev.id);
+            return updated || prev;
+          }
+          return null;
+        });
+        setLoading(false);
+      } catch (err) {
+        console.error("Error fetching orders:", err);
+      }
+    };
+
+    // Initial load
+    loadOrders();
+
+    // Poll every 3 seconds
+    const interval = setInterval(loadOrders, 3000);
+    return () => clearInterval(interval);
   }, [publicKey]);
 
   const handleCopyVault = () => {
@@ -43,16 +67,25 @@ export default function OrdersPage() {
     if (!selectedOrder || !publicKey || !sendTransaction) return;
     setIsReleasing(true);
     try {
-      if (!selectedOrder.escrow_pda || !selectedOrder.seller_pubkey) throw new Error("Missing PDA or seller pubkey");
+      if (!selectedOrder.escrow_pda || !selectedOrder.seller_pubkey)
+        throw new Error('Missing PDA or seller address.');
       const listingPda = new PublicKey(selectedOrder.escrow_pda);
       const sellerPubkey = new PublicKey(selectedOrder.seller_pubkey);
       const ix = await buildReleaseFundsInstruction(publicKey, sellerPubkey, listingPda);
-      const tx = new Transaction().add(ix);
-      const latestBlockhash = await connection.getLatestBlockhash('confirmed');
-      tx.recentBlockhash = latestBlockhash.blockhash;
-      tx.feePayer = publicKey;
-      const signature = await sendTransaction(tx, connection);
-      await connection.confirmTransaction({ signature, blockhash: latestBlockhash.blockhash, lastValidBlockHeight: latestBlockhash.lastValidBlockHeight }, 'confirmed');
+
+      const { signature, latestBlockhash } = await buildAndSendVersionedTx(
+        connection,
+        publicKey,
+        sendTransaction as any,
+        [ix]
+      );
+      const confirmation = await connection.confirmTransaction(
+        { signature, blockhash: latestBlockhash.blockhash, lastValidBlockHeight: latestBlockhash.lastValidBlockHeight },
+        'confirmed'
+      );
+      if (confirmation.value.err) {
+        throw new Error('Transaction failed on blockchain: ' + JSON.stringify(confirmation.value.err));
+      }
       await updateListingStatus(selectedOrder.id, 'Completed');
       setReleasedSuccess(true);
       const updated = { ...selectedOrder, status: 'Completed' as const };
@@ -60,7 +93,7 @@ export default function OrdersPage() {
       setOrdersList((prev) => prev.map((o) => (o.id === updated.id ? updated : o)));
     } catch (err: any) {
       console.error(err);
-      alert('Failed to release funds: ' + err.message);
+      alert('Could not release funds: ' + err.message);
     } finally {
       setIsReleasing(false);
     }
@@ -69,18 +102,26 @@ export default function OrdersPage() {
   const handleDisputeSubmit = async (reason: string, details: string, file: File | null) => {
     if (!selectedOrder || !publicKey || !sendTransaction) return;
     try {
-      if (!selectedOrder.escrow_pda) throw new Error("Missing escrow PDA. Cannot open dispute.");
+      if (!selectedOrder.escrow_pda) throw new Error('Escrow PDA not found. Cannot open dispute.');
       const listingPda = new PublicKey(selectedOrder.escrow_pda);
       const ix = await buildOpenDisputeInstruction(publicKey, listingPda);
-      const tx = new Transaction().add(ix);
-      const latestBlockhash = await connection.getLatestBlockhash('confirmed');
-      tx.recentBlockhash = latestBlockhash.blockhash;
-      tx.feePayer = publicKey;
-      const signature = await sendTransaction(tx, connection);
-      await connection.confirmTransaction({ signature, blockhash: latestBlockhash.blockhash, lastValidBlockHeight: latestBlockhash.lastValidBlockHeight }, 'confirmed');
+
+      const { signature, latestBlockhash } = await buildAndSendVersionedTx(
+        connection,
+        publicKey,
+        sendTransaction as any,
+        [ix]
+      );
+      const confirmation = await connection.confirmTransaction(
+        { signature, blockhash: latestBlockhash.blockhash, lastValidBlockHeight: latestBlockhash.lastValidBlockHeight },
+        'confirmed'
+      );
+      if (confirmation.value.err) {
+        throw new Error('Transaction failed on blockchain: ' + JSON.stringify(confirmation.value.err));
+      }
       await updateListingStatus(selectedOrder.id, 'InDispute');
 
-      // Build multipart form data for the backend API
+      // Backend API for dispute record
       const formData = new FormData();
       formData.append('listing_id', selectedOrder.id);
       formData.append('initiator_pubkey', publicKey.toBase58());
@@ -88,18 +129,14 @@ export default function OrdersPage() {
       if (details) formData.append('details', details);
       if (file) formData.append('file', file);
 
-      const res = await fetch('/api/create-dispute', {
-        method: 'POST',
-        body: formData,
-      });
+      const res = await fetch('/api/create-dispute', { method: 'POST', body: formData });
       const result = await res.json();
 
       if (!result.success) {
-        // Show specific error: file upload vs DB failure
         if (result.error?.toLowerCase().includes('upload') || result.error?.toLowerCase().includes('storage')) {
-          throw new Error(`File could not be uploaded: ${result.error}`);
+          throw new Error(`File upload failed: ${result.error}`);
         }
-        throw new Error(`Dispute could not be saved: ${result.error}`);
+        throw new Error(`Could not save dispute: ${result.error}`);
       }
 
       const updated = { ...selectedOrder, status: 'InDispute' as const };
@@ -107,7 +144,7 @@ export default function OrdersPage() {
       setOrdersList((prev) => prev.map((o) => (o.id === updated.id ? updated : o)));
     } catch (err: any) {
       console.error(err);
-      alert(err.message || 'Failed to open dispute. Please try again.');
+      alert(err.message || 'An error occurred while opening dispute. Please try again.');
     }
   };
 
@@ -136,11 +173,7 @@ export default function OrdersPage() {
     );
   }
 
-  // Fees calculations
   const assetPrice = selectedOrder.price_sol;
-  const platformFee = Number((assetPrice * 0.025).toFixed(4));
-  const networkFee = 0.00025;
-  const totalLocked = Number((assetPrice + platformFee + networkFee).toFixed(5));
 
   const isCompleted = selectedOrder.status === 'Completed';
   const isDisputed = selectedOrder.status === 'InDispute';
@@ -250,27 +283,18 @@ export default function OrdersPage() {
             )}
           </div>
 
-          {/* Right: Escrow Breakdown */}
           <div className="rounded-2xl border border-border bg-card p-6 shadow-sm flex flex-col justify-between">
             <div>
               <h3 className="text-sm font-bold text-foreground mb-4">Escrow details</h3>
               <div className="space-y-3 text-xs">
                 <div className="flex items-center justify-between text-muted-foreground">
                   <span>Asset price</span>
-                  <span className="font-mono font-medium text-foreground">{assetPrice.toFixed(2)} SOL</span>
-                </div>
-                <div className="flex items-center justify-between text-muted-foreground">
-                  <span>Platform fee (%2.5)</span>
-                  <span className="font-mono font-medium text-foreground">{platformFee} SOL</span>
-                </div>
-                <div className="flex items-center justify-between text-muted-foreground">
-                  <span>Network fee</span>
-                  <span className="font-mono font-medium text-foreground">{networkFee} SOL</span>
+                  <span className="font-mono font-medium text-foreground">{assetPrice.toFixed(4)} SOL</span>
                 </div>
                 <div className="border-t border-border pt-3">
                   <div className="flex items-center justify-between text-sm font-bold text-foreground">
-                    <span>Totel locked</span>
-                    <span className="font-mono text-base">{totalLocked} SOL</span>
+                    <span>Total locked</span>
+                    <span className="font-mono text-base">{assetPrice.toFixed(4)} SOL</span>
                   </div>
                 </div>
               </div>

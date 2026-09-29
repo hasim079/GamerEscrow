@@ -1,4 +1,4 @@
-﻿import { Connection, PublicKey, clusterApiUrl } from "@solana/web3.js";
+import { Connection, PublicKey, clusterApiUrl } from "@solana/web3.js";
 import { createClient, SupabaseClient } from "@supabase/supabase-js";
 
 // Program configuration
@@ -37,8 +37,11 @@ export interface DecodedListingAccount {
 }
 
 export function decodeListingAccount(buffer: Buffer): DecodedListingAccount | null {
-  // Expected size: 8 discriminator + 134 data bytes = 142 bytes
-  if (buffer.length < 142) {
+  // Exact on-chain size: 8 (Anchor discriminator) + 124 (data fields) = 132 bytes
+  // Fields: 32 (seller) + 1+32 (Option<buyer>) + 8 (price u64) + 32 (data_hash)
+  //       + 1 (status) + 8 (created_at i64) + 1 (bump) + 1 (vault_bump) + 8 (escrow_start_time i64)
+  const EXPECTED_SIZE = 132;
+  if (buffer.length < EXPECTED_SIZE) {
     return null;
   }
 
@@ -146,7 +149,7 @@ export class SolanaSyncService {
           await this.syncToSupabase(accountPubkey, decoded);
         },
         "confirmed",
-        [{ dataSize: 142 }] // Filter by exact ListingAccount size
+        [{ dataSize: 132 }] // Exact on-chain ListingAccount size: 8 disc + 124 data
       );
       console.log(`[SolanaSyncService] WebSocket listener established (SubId: ${this.subscriptionId})`);
     } catch (err) {
@@ -167,7 +170,7 @@ export class SolanaSyncService {
   public async reconcileAllAccounts(): Promise<void> {
     console.log(`[SolanaSyncService] Fetching all program accounts...`);
     const accounts = await this.connection.getProgramAccounts(PROGRAM_ID, {
-      filters: [{ dataSize: 142 }],
+      filters: [{ dataSize: 132 }],
     });
 
     console.log(`[SolanaSyncService] Found ${accounts.length} listing accounts on-chain.`);
@@ -215,5 +218,7 @@ export class SolanaSyncService {
   }
 }
 
-// Export singleton instance
-export const solanaSyncService = new SolanaSyncService();
+// Export class for server-side initialization only
+// Do not export a singleton instance here to prevent browser execution.
+// export const solanaSyncService = new SolanaSyncService();
+

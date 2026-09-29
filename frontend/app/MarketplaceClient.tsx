@@ -24,9 +24,29 @@ export default function MarketplaceClient({ initialListings }: { initialListings
   const [listings, setListings] = useState<ListingRecord[]>(initialListings);
   const [loading, setLoading] = useState(false);
 
-  // Calculate stats dynamically
-  const totalListings = initialListings.length;
-  const totalVolume = initialListings.reduce((sum, item) => sum + item.price_sol, 0);
+  useEffect(() => {
+    let isMounted = true;
+    const loadListings = async () => {
+      try {
+        const freshListings = await fetchMarketplaceListings();
+        if (isMounted) {
+          setListings(freshListings);
+        }
+      } catch (err) {
+        console.error("Error polling marketplace listings:", err);
+      }
+    };
+    
+    const interval = setInterval(loadListings, 3000);
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+    };
+  }, []);
+
+  // Calculate stats dynamically using current listings state, not initialListings
+  const totalListings = listings.length;
+  const totalVolume = listings.reduce((sum, item) => sum + item.price_sol, 0);
 
   const filteredListings = useMemo(() => {
     return listings.filter((item) => {

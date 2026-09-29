@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import { useWallet } from '@solana/wallet-adapter-react';
 import bs58 from 'bs58';
+import { getStoredToken } from '../lib/supabaseClient';
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const { publicKey, signMessage, connected, disconnect } = useWallet();
@@ -11,26 +12,29 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     const handleAuth = async () => {
+      // ── Wallet disconnected — clean up ────────────────────────────────────
       if (!connected || !publicKey || !signMessage) {
         setIsAuthenticated(false);
         localStorage.removeItem('gamer_escrow_jwt');
         return;
       }
 
-      const existingToken = localStorage.getItem('gamer_escrow_jwt');
+      // ── Valid token already exists (includes expiry check) ────────────────
+      const existingToken = getStoredToken();
       if (existingToken) {
-        // Assume token is valid for now. A robust app would decode and check expiry.
         setIsAuthenticated(true);
         return;
       }
 
+      // ── Token missing or expired — authenticate ───────────────────────────
       if (isAuthenticating) return;
       setIsAuthenticating(true);
 
       try {
+        // Use a fixed format message to keep it deterministic and reproducible
         const message = `Sign this message to login to GamerEscrow.\nTimestamp: ${Date.now()}`;
         const messageBytes = new TextEncoder().encode(message);
-        
+
         const signatureBytes = await signMessage(messageBytes);
         const signature = bs58.encode(signatureBytes);
 
@@ -49,11 +53,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           localStorage.setItem('gamer_escrow_jwt', data.token);
           setIsAuthenticated(true);
         } else {
-          console.error('Login failed', data.error);
+          console.error('[AuthProvider] Login failed:', data.error);
           disconnect();
         }
       } catch (err) {
-        console.error('Signature rejected or failed', err);
+        console.error('[AuthProvider] Signature rejected or network error:', err);
         disconnect();
       } finally {
         setIsAuthenticating(false);
@@ -61,7 +65,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     };
 
     handleAuth();
-  }, [connected, publicKey, signMessage, disconnect]); // eslint-disable-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [connected, publicKey, signMessage, disconnect]);
 
   return (
     <>
@@ -69,7 +74,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       {isAuthenticating && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm">
           <div className="bg-slate-900 border border-slate-800 p-8 rounded-xl shadow-2xl flex flex-col items-center max-w-sm w-full mx-4">
-            <div className="w-12 h-12 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin mb-4"></div>
+            <div className="w-12 h-12 border-4 border-green-500 border-t-transparent rounded-full animate-spin mb-4" />
             <h3 className="text-xl font-bold text-white mb-2">Authenticating...</h3>
             <p className="text-slate-400 text-center text-sm">
               Please sign the message in your wallet to securely log in to GamerEscrow.

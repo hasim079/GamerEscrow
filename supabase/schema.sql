@@ -36,6 +36,7 @@ END $$;
 CREATE TABLE IF NOT EXISTS admin_whitelist (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     wallet_pubkey TEXT UNIQUE NOT NULL,
+    email TEXT,
     role TEXT NOT NULL DEFAULT 'moderator',
     added_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -260,3 +261,12 @@ SELECT
     updated_at
 FROM listings
 WHERE status = 'Listed';
+-- 7. Whitelisted Admins can view all listings
+CREATE POLICY "Admins can view all listings"
+    ON listings FOR SELECT
+    USING (
+        EXISTS (
+            SELECT 1 FROM admin_whitelist aw
+            WHERE aw.wallet_pubkey = (auth.jwt() ->> 'wallet_address')
+        )
+    );

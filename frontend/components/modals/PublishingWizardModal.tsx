@@ -5,9 +5,9 @@ import React, { useState, useEffect } from 'react';
 import { Shield, KeyRound, Cpu, CheckCircle2, X, AlertCircle } from 'lucide-react';
 
 import { useConnection, useWallet } from '@solana/wallet-adapter-react';
-import { Transaction } from '@solana/web3.js';
 import { encryptCredentials } from '../../lib/crypto';
 import { buildCreateListingInstruction } from '../../lib/anchorClient';
+import { buildAndSendVersionedTx } from '../../lib/txUtils';
 import { createListingRecord } from '../../lib/supabaseClient';
 
 interface PublishingWizardModalProps {
@@ -56,20 +56,19 @@ export function PublishingWizardModal({
       try {
         setErrorMessage(null);
 
-        // Cüzdan kontrolü
         if (!publicKey || !sendTransaction) {
-          throw new Error('Please connect your Solana wallet to create an escrow listing.');
+          throw new Error('Please connect your Solana wallet.');
         }
 
-        // Adım 1: AES-256 İstemci Tarafı Şifreleme
+        // Step 1: AES-256 Encryption
         setCurrentStep(1);
         if (!credentialsData) {
-          throw new Error('Credential data is missing. Cannot create a listing with empty data.');
+          throw new Error('Credentials missing. Please enter account details.');
         }
-        const encrypted = encryptCredentials(credentialsData, "gamer_escrow_secret_key");
+        const encrypted = encryptCredentials(credentialsData, 'gamer_escrow_secret_key');
         if (!isMounted) return;
 
-        // Adım 2: PDA ve On-chain Instruction Oluşturma
+        // Step 2: Generate Listing PDA
         setCurrentStep(2);
         const { instruction, listingPda, vaultPda } = await buildCreateListingInstruction(
           publicKey,
@@ -78,61 +77,35 @@ export function PublishingWizardModal({
         );
         if (!isMounted) return;
 
-        // Adım 3: Phantom Cüzdan Onayı ve Blokzincire Yayınlama
-        // NOT: Phantom'ın Chrome service worker'ının uykuya geçmesini önlemek için
-        // blockhash alınıp cüzdan pop-up'ı DEREKSİZ (gecikme olmadan) açılmalı.
+        // Step 3: Phantom signature + broadcast to blockchain
         setCurrentStep(3);
 
-        const latestBlockhash = await connection.getLatestBlockhash('confirmed');
-        const tx = new Transaction().add(instruction);
-        tx.recentBlockhash = latestBlockhash.blockhash;
-        tx.feePayer = publicKey;
+        const { signature, latestBlockhash } = await buildAndSendVersionedTx(
+          connection,
+          publicKey,
+          sendTransaction as any,
+          [instruction]
+        );
 
-        // Phantom "disconnected port" hatasına karşı retry mekanizması
-        let txSignature: string | null = null;
-        let lastErr: any = null;
-        for (let attempt = 0; attempt < 3; attempt++) {
-          try {
-            // Her denemede taze blockhash al (expired olmasın)
-            if (attempt > 0) {
-              const freshBlockhash = await connection.getLatestBlockhash('confirmed');
-              tx.recentBlockhash = freshBlockhash.blockhash;
-            }
-            txSignature = await sendTransaction(tx, connection);
-            lastErr = null;
-            break; // Başarılı, döngüden çık
-          } catch (walletErr: any) {
-            lastErr = walletErr;
-            // Sadece disconnected port / unexpected error durumunda retry yap
-            const msg = (walletErr?.message || '').toLowerCase();
-            if (
-              msg.includes('disconnected') ||
-              msg.includes('unexpected error') ||
-              msg.includes('failed to send message') ||
-              msg.includes('port')
-            ) {
-              console.warn(`[PublishingWizard] Phantom port error, retrying (attempt ${attempt + 1}/3)...`);
-              await new Promise((r) => setTimeout(r, 800)); // Phantom'ın yeniden bağlanması için bekle
-              continue;
-            }
-            throw walletErr; // Diğer hataları (kullanıcı reddi gibi) direkt fırlat
-          }
+        // Wait for confirmation
+        const confirmation = await connection.confirmTransaction(
+          {
+            signature,
+            blockhash: latestBlockhash.blockhash,
+            lastValidBlockHeight: latestBlockhash.lastValidBlockHeight,
+          },
+          'confirmed'
+        );
+
+        if (confirmation.value.err) {
+          throw new Error(
+            `Blockchain transaction failed: ${JSON.stringify(confirmation.value.err)}`
+          );
         }
-
-        if (!txSignature) {
-          throw lastErr || new Error('Transaction could not be sent after 3 attempts. Please open Phantom and try again.');
-        }
-
-        // İşlemin onaylanmasını bekle
-        await connection.confirmTransaction({
-          signature: txSignature,
-          blockhash: latestBlockhash.blockhash,
-          lastValidBlockHeight: latestBlockhash.lastValidBlockHeight,
-        }, 'confirmed');
 
         if (!isMounted) return;
 
-        // Adım 4: Veritabanına (Supabase) Güvenli Kayıt — YALNIZCA on-chain başarılı olduktan sonra
+        // Step 4: Save to Supabase — only after on-chain success
         await createListingRecord({
           seller_pubkey: publicKey.toBase58(),
           buyer_pubkey: null,
@@ -155,13 +128,15 @@ export function PublishingWizardModal({
           setIsDone(true);
         }
       } catch (err: any) {
-        console.error('[PublishingWizard] Process error:', err);
+        console.error('[PublishingWizard] Error:', err);
         if (isMounted) {
           const msg = (err?.message || '').toLowerCase();
           if (msg.includes('rejected') || msg.includes('user denied')) {
-            setErrorMessage('Transaction rejected by wallet. Please approve the transaction in Phantom.');
+            setErrorMessage('Transaction was rejected by the wallet. Please approve the transaction in Phantom.');
           } else if (msg.includes('disconnected') || msg.includes('port')) {
-            setErrorMessage('Phantom wallet disconnected. Please click the Phantom icon in your browser toolbar to wake it up, then try again.');
+            setErrorMessage(
+              'Phantom wallet connection lost. Please open Phantom from your browser toolbar and try again.'
+            );
           } else {
             setErrorMessage(err.message || 'Transaction failed or was rejected by wallet.');
           }
@@ -174,7 +149,7 @@ export function PublishingWizardModal({
     return () => {
       isMounted = false;
     };
-  }, [isOpen, publicKey, sendTransaction, connection, priceSol, listingTitle, credentialsData]);
+  }, [isOpen, publicKey, sendTransaction, connection, priceSol, listingTitle, credentialsData]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (!isOpen) return null;
 
@@ -200,7 +175,7 @@ export function PublishingWizardModal({
         </div>
 
         <div className="my-6 space-y-4">
-          {/* Step 1: AES Encryption */}
+          {/* Adım 1 */}
           <div className={`flex items-start gap-3 rounded-xl border p-3.5 transition-all ${
             currentStep === 1 && !errorMessage
               ? 'border-brand bg-brand/5 ring-2 ring-brand/20'
@@ -221,7 +196,7 @@ export function PublishingWizardModal({
             </div>
           </div>
 
-          {/* Step 2: Listing PDA */}
+          {/* Adım 2 */}
           <div className={`flex items-start gap-3 rounded-xl border p-3.5 transition-all ${
             currentStep === 2 && !errorMessage
               ? 'border-brand bg-brand/5 ring-2 ring-brand/20'
@@ -242,7 +217,7 @@ export function PublishingWizardModal({
             </div>
           </div>
 
-          {/* Step 3: Phantom Wallet Signature */}
+          {/* Adım 3 */}
           <div className={`flex items-start gap-3 rounded-xl border p-3.5 transition-all ${
             currentStep === 3 && !errorMessage
               ? 'border-brand bg-brand/5 ring-2 ring-brand/20'
@@ -264,7 +239,7 @@ export function PublishingWizardModal({
           </div>
         </div>
 
-        {/* Status / Actions */}
+        {/* Durum / Butonlar */}
         {errorMessage ? (
           <div className="space-y-3 animate-in zoom-in-95 duration-200">
             <div className="flex items-center gap-2 rounded-xl bg-destructive/10 border border-destructive/30 p-3 text-xs font-medium text-destructive">

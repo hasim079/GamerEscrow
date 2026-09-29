@@ -1,7 +1,21 @@
-import { createClient } from "@supabase/supabase-js";
+import { createClient, SupabaseClient } from "@supabase/supabase-js";
 import bs58 from "bs58";
 import { buildChallengeMessage, generateNonce } from "./crypto";
+import { DISPUTE_BUCKET } from "./constants";
 
+export { DISPUTE_BUCKET };
+
+// ─── Environment ─────────────────────────────────────────────────────────────
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
+const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
+
+if (!supabaseUrl || !supabaseAnonKey) {
+  throw new Error(
+    "NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY are required."
+  );
+}
+
+// ─── Types ───────────────────────────────────────────────────────────────────
 export interface ListingRecord {
   id: string;
   seller_pubkey: string;
@@ -17,7 +31,13 @@ export interface ListingRecord {
   data_hash: string;
   encrypted_credentials?: string;
   encryption_iv?: string;
-  status: "Draft" | "Listed" | "InEscrow" | "Completed" | "InDispute" | "Cancelled";
+  status:
+    | "Draft"
+    | "Listed"
+    | "InEscrow"
+    | "Completed"
+    | "InDispute"
+    | "Cancelled";
   escrow_pda?: string;
   vault_pda?: string;
   tags?: string[];
@@ -36,46 +56,74 @@ export interface DisputeRecord {
   evidence_urls?: string[];
   seller_response?: string;
   seller_evidence_urls?: string[];
-  status: "Open" | "UnderReview" | "Resolved_Refunded" | "Resolved_Released" | "Dismissed";
+  status:
+    | "Open"
+    | "UnderReview"
+    | "Resolved_Refunded"
+    | "Resolved_Released"
+    | "Dismissed";
   resolution?: string;
   resolved_by?: string;
   created_at?: string;
   updated_at?: string;
 }
 
-const supabaseUrl =
-  process.env.NEXT_PUBLIC_SUPABASE_URL || "http://127.0.0.1:54321";
-const supabaseAnonKey =
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "placeholder-anon-key";
-
-export const supabase = createClient(supabaseUrl, supabaseAnonKey);
-
+// ─── Singleton Supabase Client ────────────────────────────────────────────────
 /**
- * Creates a Supabase client that injects the user's JWT into the headers
- * so that Row Level Security (RLS) policies can correctly identify the user.
+ * Global singleton — only ONE GoTrueClient instance is created.
+ * auth.persistSession: false because we use wallet-based JWT, not Supabase Auth sessions.
  */
-export function getAuthClient(jwtToken?: string) {
-  if (!jwtToken) {
-    // Attempt to get token from localStorage if not provided
-    if (typeof window !== 'undefined') {
-      jwtToken = localStorage.getItem('gamer_escrow_jwt') || undefined;
+export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
+  auth: { persistSession: false },
+});
+
+// ─── JWT Token Helpers ────────────────────────────────────────────────────────
+/**
+ * Reads the stored JWT from localStorage and checks if it is still valid.
+ * Returns null if missing or expired.
+ */
+export function getStoredToken(): string | null {
+  if (typeof window === "undefined") return null;
+  const token = localStorage.getItem("gamer_escrow_jwt");
+  if (!token) return null;
+
+  try {
+    const [, payloadB64] = token.split(".");
+    const payload = JSON.parse(atob(payloadB64));
+    // Treat as invalid 60 seconds before actual expiry (clock-skew tolerance)
+    if (payload.exp && payload.exp > Math.floor(Date.now() / 1000) + 60) {
+      return token;
     }
+  } catch {
+    // malformed token
   }
-  
-  if (!jwtToken) return supabase;
-  
-  return createClient(supabaseUrl, supabaseAnonKey, {
-    global: {
-      headers: {
-        Authorization: `Bearer ${jwtToken}`,
-      },
-    },
-  });
+
+  // Token is expired or malformed — clean up
+  localStorage.removeItem("gamer_escrow_jwt");
+  return null;
 }
 
 /**
- * Fetch all publicly available listings currently listed in the marketplace.
+ * Returns a Supabase client with the user's JWT injected for RLS.
+ * Creates a new client instance only when a valid token exists.
+ * Falls back to the public singleton when there is no valid token.
  */
+export function getAuthClient(jwtToken?: string): SupabaseClient {
+  const token = jwtToken ?? getStoredToken();
+
+  if (!token) return supabase;
+
+  // A new client is required to override the Authorization header.
+  // persistSession: false ensures no additional GoTrueClient state is created.
+  return createClient(supabaseUrl, supabaseAnonKey, {
+    auth: { persistSession: false },
+    global: { headers: { Authorization: `Bearer ${token}` } },
+  });
+}
+
+// ─── Listings ─────────────────────────────────────────────────────────────────
+
+/** Fetch all publicly available listings currently listed in the marketplace. */
 export async function fetchMarketplaceListings(): Promise<ListingRecord[]> {
   try {
     const { data, error } = await supabase
@@ -85,20 +133,20 @@ export async function fetchMarketplaceListings(): Promise<ListingRecord[]> {
       .order("created_at", { ascending: false });
 
     if (error) {
-      console.warn("[supabase] fetchMarketplaceListings warning:", error.message);
+      console.warn("[supabase] fetchMarketplaceListings:", error.message);
       return [];
     }
     return (data as ListingRecord[]) || [];
   } catch (err) {
-    console.error("[supabase] Error fetching marketplace listings:", err);
+    console.error("[supabase] fetchMarketplaceListings exception:", err);
     return [];
   }
 }
 
-/**
- * Fetch all listings belonging to a specific seller (Drafts, Listed, InEscrow, Completed).
- */
-export async function fetchSellerListings(sellerPubkey: string): Promise<ListingRecord[]> {
+/** Fetch all listings belonging to a specific seller. */
+export async function fetchSellerListings(
+  sellerPubkey: string
+): Promise<ListingRecord[]> {
   try {
     const client = getAuthClient();
     const { data, error } = await client
@@ -108,20 +156,20 @@ export async function fetchSellerListings(sellerPubkey: string): Promise<Listing
       .order("created_at", { ascending: false });
 
     if (error) {
-      console.warn("[supabase] fetchSellerListings warning:", error.message);
+      console.warn("[supabase] fetchSellerListings:", error.message);
       return [];
     }
     return (data as ListingRecord[]) || [];
   } catch (err) {
-    console.error("[supabase] Error fetching seller listings:", err);
+    console.error("[supabase] fetchSellerListings exception:", err);
     return [];
   }
 }
 
-/**
- * Fetch all orders for a buyer wallet (InEscrow, Completed, InDispute).
- */
-export async function fetchBuyerOrders(buyerPubkey: string): Promise<ListingRecord[]> {
+/** Fetch all orders for a buyer wallet. */
+export async function fetchBuyerOrders(
+  buyerPubkey: string
+): Promise<ListingRecord[]> {
   try {
     const client = getAuthClient();
     const { data, error } = await client
@@ -131,41 +179,40 @@ export async function fetchBuyerOrders(buyerPubkey: string): Promise<ListingReco
       .order("created_at", { ascending: false });
 
     if (error) {
-      console.warn("[supabase] fetchBuyerOrders warning:", error.message);
+      console.warn("[supabase] fetchBuyerOrders:", error.message);
       return [];
     }
     return (data as ListingRecord[]) || [];
   } catch (err) {
-    console.error("[supabase] Error fetching buyer orders:", err);
+    console.error("[supabase] fetchBuyerOrders exception:", err);
     return [];
   }
 }
 
-/**
- * Fetch a single listing by its primary ID.
- */
-export async function fetchListingById(id: string): Promise<ListingRecord | null> {
+/** Fetch a single listing by its primary ID. */
+export async function fetchListingById(
+  id: string
+): Promise<ListingRecord | null> {
   try {
-    const { data, error } = await supabase
+    const client = getAuthClient();
+    const { data, error } = await client
       .from("listings")
       .select("*")
       .eq("id", id)
       .maybeSingle();
 
     if (error) {
-      console.warn("[supabase] fetchListingById warning:", error.message);
+      console.warn("[supabase] fetchListingById:", error.message);
       return null;
     }
     return data as ListingRecord;
   } catch (err) {
-    console.error("[supabase] Error fetching listing by id:", err);
+    console.error("[supabase] fetchListingById exception:", err);
     return null;
   }
 }
 
-/**
- * Create a new listing record in Supabase.
- */
+/** Create a new listing record in Supabase. */
 export async function createListingRecord(
   payload: Omit<ListingRecord, "id" | "created_at" | "updated_at">
 ): Promise<ListingRecord | null> {
@@ -178,41 +225,42 @@ export async function createListingRecord(
       .single();
 
     if (error) {
-      console.error("[supabase] createListingRecord error:", error.message);
+      console.error("[supabase] createListingRecord:", error.message);
       return null;
     }
     return data as ListingRecord;
   } catch (err) {
-    console.error("[supabase] Error creating listing:", err);
+    console.error("[supabase] createListingRecord exception:", err);
     return null;
   }
 }
 
-/**
- * Delete a listing record from Supabase (e.g. after successfully publishing a draft).
- */
-export async function deleteListingRecord(id: string, sellerPubkey: string): Promise<boolean> {
+/** Delete a listing record via the trusted backend API route. */
+export async function deleteListingRecord(
+  id: string,
+  sellerPubkey: string
+): Promise<boolean> {
   try {
-    const res = await fetch('/api/delete-listing', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id, seller_pubkey: sellerPubkey })
+    const res = await fetch("/api/delete-listing", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id, seller_pubkey: sellerPubkey }),
     });
-    
     const data = await res.json();
     if (!data.success) {
-      console.error("[Backend API] deleteListingRecord error:", data.error);
+      console.error("[API] deleteListingRecord:", data.error);
       return false;
     }
     return true;
   } catch (err) {
-    console.error("[Backend API] Network/Fetch error:", err);
+    console.error("[API] deleteListingRecord network error:", err);
     return false;
   }
 }
 
 /**
- * Update the status of a listing (e.g. after on-chain transaction).
+ * Update the status of a listing via the trusted backend API route.
+ * Uses service_role key server-side to bypass RLS.
  */
 export async function updateListingStatus(
   id: string,
@@ -221,56 +269,48 @@ export async function updateListingStatus(
   vaultPda?: string
 ): Promise<boolean> {
   try {
-    const res = await fetch('/api/update-listing', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id, status, buyerPubkey, vaultPda })
+    const res = await fetch("/api/update-listing", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id, status, buyerPubkey, vaultPda }),
     });
-    
     const data = await res.json();
     if (!data.success) {
-      console.error("[Backend API] updateListingStatus error:", data.error);
+      console.error("[API] updateListingStatus:", data.error);
       return false;
     }
     return true;
   } catch (err) {
-    console.error("[Backend API] Network/Fetch error:", err);
+    console.error("[API] updateListingStatus network error:", err);
     return false;
   }
 }
 
-/**
- * Check if a given wallet address is in the admin whitelist from Supabase.
- */
+/** Check if a wallet address is in the admin whitelist. */
 export async function checkIsAdmin(walletPubkey: string): Promise<boolean> {
   if (!walletPubkey) return false;
-
   try {
-    // Cüzdan adresindeki olası boşlukları temizle
     const cleanPubkey = walletPubkey.trim();
-    const client = getAuthClient();
-
-    const { data, error } = await client
+    const { data, error } = await supabase
       .from("admin_whitelist")
       .select("role")
       .eq("wallet_pubkey", cleanPubkey)
       .maybeSingle();
 
     if (error) {
-      console.warn("[supabase] checkIsAdmin warning:", error.message);
+      console.warn("[supabase] checkIsAdmin:", error.message);
       return false;
     }
-
     return !!data;
   } catch (err) {
-    console.error("[supabase] Error checking admin status:", err);
+    console.error("[supabase] checkIsAdmin exception:", err);
     return false;
   }
 }
 
-/**
- * Fetch disputes. If isAdmin is true, fetches all disputes; otherwise user-related.
- */
+// ─── Disputes ─────────────────────────────────────────────────────────────────
+
+/** Fetch disputes. Admin=true fetches all; otherwise user-related only. */
 export async function fetchDisputes(
   walletPubkey?: string,
   isAdmin: boolean = false
@@ -283,21 +323,21 @@ export async function fetchDisputes(
       query = query.eq("initiator_pubkey", walletPubkey);
     }
 
-    const { data, error } = await query.order("created_at", { ascending: false });
+    const { data, error } = await query.order("created_at", {
+      ascending: false,
+    });
     if (error) {
-      console.warn("[supabase] fetchDisputes warning:", error.message);
+      console.warn("[supabase] fetchDisputes:", error.message);
       return [];
     }
     return (data as DisputeRecord[]) || [];
   } catch (err) {
-    console.error("[supabase] Error fetching disputes:", err);
+    console.error("[supabase] fetchDisputes exception:", err);
     return [];
   }
 }
 
-/**
- * Create a new dispute record.
- */
+/** Create a new dispute record directly (uses authenticated client). */
 export async function createDisputeRecord(
   payload: Omit<DisputeRecord, "id" | "created_at" | "updated_at">
 ): Promise<DisputeRecord | null> {
@@ -310,28 +350,21 @@ export async function createDisputeRecord(
       .single();
 
     if (error) {
-      console.error("[supabase] createDisputeRecord error:", error.message);
+      console.error("[supabase] createDisputeRecord:", error.message);
       return null;
     }
     return data as DisputeRecord;
   } catch (err) {
-    console.error("[supabase] Error creating dispute:", err);
+    console.error("[supabase] createDisputeRecord exception:", err);
     return null;
   }
 }
 
-/**
- * Request credentials decryption from Supabase Edge Function via wallet Ed25519 signature.
- */
-
-/**
- * Update a dispute with seller's response and evidence.
- */
+/** Update a dispute with seller's response and evidence. */
 export async function updateDisputeSellerResponse(
   disputeId: string,
   sellerResponse: string,
-  sellerEvidenceUrls?: string[],
-  walletPubkey?: string
+  sellerEvidenceUrls?: string[]
 ): Promise<boolean> {
   try {
     const client = getAuthClient();
@@ -345,22 +378,19 @@ export async function updateDisputeSellerResponse(
       .eq("id", disputeId);
 
     if (error) {
-      console.error("[supabase] updateDisputeSellerResponse error:", error.message);
+      console.error("[supabase] updateDisputeSellerResponse:", error.message);
       return false;
     }
     return true;
   } catch (err) {
-    console.error("[supabase] Error updating dispute seller response:", err);
+    console.error("[supabase] updateDisputeSellerResponse exception:", err);
     return false;
   }
 }
 
-/**
- * Fetch disputes for a specific listing (used by seller to see if their listing has a dispute).
- */
+/** Fetch the most recent dispute for a specific listing. */
 export async function fetchDisputesByListing(
-  listingId: string,
-  walletPubkey?: string
+  listingId: string
 ): Promise<DisputeRecord | null> {
   try {
     const client = getAuthClient();
@@ -373,31 +403,41 @@ export async function fetchDisputesByListing(
       .maybeSingle();
 
     if (error) {
-      console.warn("[supabase] fetchDisputesByListing warning:", error.message);
+      console.warn("[supabase] fetchDisputesByListing:", error.message);
       return null;
     }
     return data as DisputeRecord | null;
   } catch (err) {
-    console.error("[supabase] Error fetching dispute by listing:", err);
+    console.error("[supabase] fetchDisputesByListing exception:", err);
     return null;
   }
 }
+
+// ─── Credentials Decryption ────────────────────────────────────────────────────
+
+/**
+ * Request credentials decryption from the Supabase Edge Function.
+ * Uses an Ed25519 wallet signature as the authentication challenge.
+ */
 export async function requestCredentialsDecryption(
   listingId: string,
   buyerPubkey: string,
   signMessage: (message: Uint8Array) => Promise<Uint8Array>
-): Promise<{ success: boolean; encryptedCredentials?: string; encryptionIv?: string; error?: string }> {
+): Promise<{
+  success: boolean;
+  encryptedCredentials?: string;
+  encryptionIv?: string;
+  error?: string;
+}> {
   try {
     const timestamp = Date.now();
     const nonce = generateNonce();
     const challengeText = buildChallengeMessage(listingId, nonce, timestamp);
     const messageBytes = new TextEncoder().encode(challengeText);
 
-    // Prompt user wallet to sign challenge
     const signatureBytes = await signMessage(messageBytes);
     const signatureBase58 = bs58.encode(signatureBytes);
 
-    // Call Supabase Edge Function
     const edgeFunctionUrl = `${supabaseUrl}/functions/v1/decrypt-credentials`;
 
     const response = await fetch(edgeFunctionUrl, {
@@ -417,7 +457,10 @@ export async function requestCredentialsDecryption(
 
     const result = await response.json();
     if (!response.ok || !result.success) {
-      return { success: false, error: result.error || "Failed to decrypt credentials" };
+      return {
+        success: false,
+        error: result.error || "Failed to decrypt credentials",
+      };
     }
 
     return {

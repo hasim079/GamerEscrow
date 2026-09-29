@@ -10,16 +10,15 @@ import { Shield, Copy, Check, CheckCircle2, AlertTriangle, ArrowLeft } from 'luc
 import Link from 'next/link';
 
 import { useConnection, useWallet } from '@solana/wallet-adapter-react';
-import { PublicKey, Transaction } from '@solana/web3.js';
+import { PublicKey } from '@solana/web3.js';
 import {
   buildReleaseFundsInstruction,
   buildOpenDisputeInstruction,
-  getListingPda,
 } from '../../../lib/anchorClient';
+import { buildAndSendVersionedTx } from '../../../lib/txUtils';
 import {
   fetchListingById,
   updateListingStatus,
-  createDisputeRecord,
   ListingRecord,
 } from '../../../lib/supabaseClient';
 
@@ -33,18 +32,32 @@ export default function OrderDetailPage() {
   const [isReleasing, setIsReleasing] = useState(false);
   const [releasedSuccess, setReleasedSuccess] = useState(false);
   const [copiedVault, setCopiedVault] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const { connection } = useConnection();
   const { publicKey, sendTransaction } = useWallet();
 
   useEffect(() => {
     async function loadOrder() {
-      if (!orderIdParam) { setLoading(false); return; }
-      const dbListing = await fetchListingById(orderIdParam);
-      setSelectedOrder(dbListing);
-      setLoading(false);
+      if (!orderIdParam) {
+        setLoading(false);
+        return;
+      }
+      try {
+        const dbListing = await fetchListingById(orderIdParam);
+        setSelectedOrder(dbListing);
+      } catch (err) {
+        console.error('[OrderDetail] Error fetching order:', err);
+      } finally {
+        setLoading(false);
+      }
     }
+
     loadOrder();
+
+    // Poll every 5 seconds for status updates
+    const interval = setInterval(loadOrder, 5000);
+    return () => clearInterval(interval);
   }, [orderIdParam]);
 
   const handleCopyVault = () => {
@@ -54,103 +67,149 @@ export default function OrderDetailPage() {
     setTimeout(() => setCopiedVault(false), 2000);
   };
 
+  // ── Release Funds ───────────────────────────────────────────────────────────
   const handleReleaseFunds = async () => {
+    setActionError(null);
+
+    if (!publicKey || !sendTransaction) {
+      setActionError('Please connect your wallet.');
+      return;
+    }
     if (!selectedOrder) return;
+
+    // Guard: escrow_pda is required — never use a fake fallback
+    if (!selectedOrder.escrow_pda) {
+      setActionError(
+        'Listing PDA address for this order could not be found. Please contact support.'
+      );
+      return;
+    }
+    if (!selectedOrder.seller_pubkey) {
+      setActionError('Seller address not found.');
+      return;
+    }
+
     setIsReleasing(true);
     try {
-      if (publicKey && sendTransaction) {
-        try {
-          const sellerKey = new PublicKey(
-            selectedOrder.seller_pubkey && selectedOrder.seller_pubkey.length >= 32
-              ? selectedOrder.seller_pubkey
-              : publicKey
-          );
-          const listingKey =
-            selectedOrder.escrow_pda && selectedOrder.escrow_pda.length >= 32
-              ? new PublicKey(selectedOrder.escrow_pda)
-              : getListingPda(sellerKey, new Uint8Array(32).fill(1))[0];
+      const sellerKey = new PublicKey(selectedOrder.seller_pubkey);
+      const listingKey = new PublicKey(selectedOrder.escrow_pda);
 
-          const ix = await buildReleaseFundsInstruction(publicKey, sellerKey, listingKey);
-          const tx = new Transaction().add(ix);
-          const latest = await connection.getLatestBlockhash('confirmed');
-          tx.recentBlockhash = latest.blockhash;
-          tx.feePayer = publicKey;
+      const ix = await buildReleaseFundsInstruction(publicKey, sellerKey, listingKey);
 
-          await sendTransaction(tx, connection);
-          await updateListingStatus(selectedOrder.id, 'Completed');
+      const { signature, latestBlockhash } = await buildAndSendVersionedTx(
+        connection,
+        publicKey,
+        sendTransaction as any,
+        [ix]
+      );
 
-          setIsReleasing(false);
-          setReleasedSuccess(true);
-          setSelectedOrder((prev) => prev ? { ...prev, status: 'Completed' as const } : prev);
-        } catch (chainErr) {
-          console.error('[ReleaseFunds] On-chain instruction failed:', chainErr);
-          alert('Transaction failed or was rejected. Please try again.');
-        }
+      const confirmation = await connection.confirmTransaction(
+        {
+          signature,
+          blockhash: latestBlockhash.blockhash,
+          lastValidBlockHeight: latestBlockhash.lastValidBlockHeight,
+        },
+        'confirmed'
+      );
+
+      if (confirmation.value.err) {
+        throw new Error(
+          'Transaction failed on-chain: ' + JSON.stringify(confirmation.value.err)
+        );
       }
+
+      await updateListingStatus(selectedOrder.id, 'Completed');
+      setReleasedSuccess(true);
+      setSelectedOrder((prev) =>
+        prev ? { ...prev, status: 'Completed' as const } : prev
+      );
+    } catch (err: any) {
+      console.error('[ReleaseFunds]', err);
+      setActionError(err.message || 'Transaction failed. Please try again.');
     } finally {
       setIsReleasing(false);
     }
   };
 
-  const handleDisputeSubmit = async (reason: string, details: string, file: File | null) => {
-    if (!selectedOrder) return;
-    try {
-      if (publicKey && sendTransaction) {
-        try {
-          const sellerKey = new PublicKey(
-            selectedOrder.seller_pubkey && selectedOrder.seller_pubkey.length >= 32
-              ? selectedOrder.seller_pubkey
-              : publicKey
-          );
-          const listingKey =
-            selectedOrder.escrow_pda && selectedOrder.escrow_pda.length >= 32
-              ? new PublicKey(selectedOrder.escrow_pda)
-              : getListingPda(sellerKey, new Uint8Array(32).fill(1))[0];
+  // ── Dispute Submit ──────────────────────────────────────────────────────────
+  const handleDisputeSubmit = async (
+    reason: string,
+    details: string,
+    file: File | null
+  ) => {
+    setActionError(null);
 
-          const ix = await buildOpenDisputeInstruction(publicKey, listingKey);
-          const tx = new Transaction().add(ix);
-          const latest = await connection.getLatestBlockhash('confirmed');
-          tx.recentBlockhash = latest.blockhash;
-          tx.feePayer = publicKey;
-          await sendTransaction(tx, connection);
-
-          let evidenceUrl = '';
-          if (file) {
-            const { supabase } = await import('../../../lib/supabaseClient');
-            const fileExt = file.name.split('.').pop();
-            const fileName = `${selectedOrder.id}_${Date.now()}.${fileExt}`;
-            const { data, error } = await supabase.storage.from('disputes').upload(fileName, file);
-            if (!error && data) {
-              const { data: { publicUrl } } = supabase.storage.from('disputes').getPublicUrl(data.path);
-              evidenceUrl = publicUrl;
-            } else {
-              console.warn('File upload failed', error);
-            }
-          }
-
-          await createDisputeRecord({
-            listing_id: selectedOrder.id,
-            initiator_pubkey: publicKey ? publicKey.toBase58() : (selectedOrder.buyer_pubkey || ''),
-            reason,
-            details,
-            evidence_urls: evidenceUrl ? [evidenceUrl] : undefined,
-            status: 'Open',
-          });
-          await updateListingStatus(selectedOrder.id, 'InDispute');
-          setSelectedOrder((prev) => prev ? { ...prev, status: 'InDispute' as const } : prev);
-        } catch (chainErr) {
-          console.error('[Dispute] On-chain dispute failed:', chainErr);
-          alert('The dispute process failed on the blokchain.');
-        }
-      } else {
-        alert('Wallet not connected.');
-      }
-    } catch (err) {
-      console.error('[Dispute] Submit error:', err);
-      alert('An error occurred while submitting the dispute.');
+    if (!publicKey || !sendTransaction) {
+      throw new Error('Wallet not connected.');
     }
+    if (!selectedOrder) return;
+
+    // Guard: escrow_pda is required — never use a fake fallback
+    if (!selectedOrder.escrow_pda) {
+      throw new Error(
+        'Listing PDA address is missing. Cannot open dispute on-chain.'
+      );
+    }
+
+    const listingKey = new PublicKey(selectedOrder.escrow_pda);
+
+    // ── 1. On-chain: openDispute instruction ─────────────────────────────────
+    const ix = await buildOpenDisputeInstruction(publicKey, listingKey);
+
+    const { signature, latestBlockhash } = await buildAndSendVersionedTx(
+      connection,
+      publicKey,
+      sendTransaction as any,
+      [ix]
+    );
+
+    const confirmation = await connection.confirmTransaction(
+      {
+        signature,
+        blockhash: latestBlockhash.blockhash,
+        lastValidBlockHeight: latestBlockhash.lastValidBlockHeight,
+      },
+      'confirmed'
+    );
+
+    if (confirmation.value.err) {
+      throw new Error(
+        'On-chain dispute transaction failed: ' +
+          JSON.stringify(confirmation.value.err)
+      );
+    }
+
+    // ── 2. Backend API: create dispute record + update listing status ─────────
+    // Using the API route (FormData) so the server can handle storage upload
+    // and use the service_role key to bypass RLS atomically.
+    const formData = new FormData();
+    formData.append('listing_id', selectedOrder.id);
+    formData.append('initiator_pubkey', publicKey.toBase58());
+    formData.append('reason', reason);
+    formData.append('details', details);
+    if (file) formData.append('file', file);
+
+    const res = await fetch('/api/create-dispute', {
+      method: 'POST',
+      body: formData,
+    });
+
+    const data = await res.json();
+    if (!data.success) {
+      throw new Error(
+        data.error || 'Failed to create dispute record in database.'
+      );
+    }
+
+    // ── 3. Update local state ─────────────────────────────────────────────────
+    // The API route already updated the listing status in the DB.
+    // Update local state to reflect immediately.
+    setSelectedOrder((prev) =>
+      prev ? { ...prev, status: 'InDispute' as const } : prev
+    );
   };
 
+  // ── Render ──────────────────────────────────────────────────────────────────
   if (loading) {
     return (
       <div className="mx-auto max-w-5xl px-4 py-16 sm:px-6 text-center">
@@ -163,16 +222,17 @@ export default function OrderDetailPage() {
     return (
       <div className="mx-auto max-w-5xl px-4 py-16 sm:px-6 text-center">
         <p className="text-muted-foreground text-sm">Order not found.</p>
-        <Link href="/orders" className="mt-4 inline-block text-brand text-xs font-semibold hover:underline"> Return to Orders</Link>
+        <Link
+          href="/orders"
+          className="mt-4 inline-block text-brand text-xs font-semibold hover:underline"
+        >
+          Return to Orders
+        </Link>
       </div>
     );
   }
 
   const assetPrice = selectedOrder.price_sol;
-  const platformFee = Number((assetPrice * 0.025).toFixed(4));
-  const networkFee = 0.00025;
-  const totalLocked = Number((assetPrice + platformFee + networkFee).toFixed(5));
-
   const isCompleted = selectedOrder.status === 'Completed';
   const isDisputed = selectedOrder.status === 'InDispute';
 
@@ -188,6 +248,7 @@ export default function OrderDetailPage() {
       </div>
 
       <div className="space-y-6">
+        {/* Escrow header */}
         <div className="rounded-2xl border border-brand/20 bg-brand/[0.04] dark:bg-brand/[0.07] p-6 shadow-sm">
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
             <div className="flex items-start gap-4">
@@ -196,21 +257,33 @@ export default function OrderDetailPage() {
               </div>
               <div>
                 <div className="flex items-center gap-2.5">
-                  <h1 className="text-xl font-bold tracking-tight text-foreground">Active Escrow </h1>
+                  <h1 className="text-xl font-bold tracking-tight text-foreground">
+                    Active Escrow
+                  </h1>
                   <span className="rounded-md bg-brand/15 px-2.5 py-0.5 text-xs font-mono font-bold text-brand">
-                    Order {selectedOrder.id.slice(0,8)}...
+                    Order {selectedOrder.id.slice(0, 8)}...
                   </span>
                 </div>
                 <div className="mt-1 flex items-center gap-1.5 text-xs text-muted-foreground">
                   <span>Vault</span>
-                  <span className="font-mono text-foreground">{selectedOrder.vault_pda || '�'}</span>
-                  <button
-                    type="button"
-                    onClick={handleCopyVault}
-                    className="p-1 text-muted-foreground hover:text-foreground transition-colors"
-                  >
-                    {copiedVault ? <Check className="size-3.5 text-brand" /> : <Copy className="size-3.5" />}
-                  </button>
+                  <span className="font-mono text-foreground">
+                    {selectedOrder.vault_pda
+                      ? `${selectedOrder.vault_pda.slice(0, 8)}...${selectedOrder.vault_pda.slice(-6)}`
+                      : '—'}
+                  </span>
+                  {selectedOrder.vault_pda && (
+                    <button
+                      type="button"
+                      onClick={handleCopyVault}
+                      className="p-1 text-muted-foreground hover:text-foreground transition-colors"
+                    >
+                      {copiedVault ? (
+                        <Check className="size-3.5 text-brand" />
+                      ) : (
+                        <Copy className="size-3.5" />
+                      )}
+                    </button>
+                  )}
                 </div>
               </div>
             </div>
@@ -220,7 +293,7 @@ export default function OrderDetailPage() {
                 Locked amount
               </span>
               <div className="font-mono text-3xl font-extrabold text-foreground">
-                {selectedOrder.price_sol.toFixed(2)} SOL
+                {assetPrice.toFixed(2)} SOL
               </div>
             </div>
           </div>
@@ -231,6 +304,7 @@ export default function OrderDetailPage() {
         </div>
 
         <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
+          {/* Status / Timer */}
           <div className="rounded-2xl border border-border bg-card p-6 shadow-sm flex flex-col items-center justify-center">
             {!isCompleted && !isDisputed ? (
               <CountdownTimer initialSeconds={2570} />
@@ -239,9 +313,12 @@ export default function OrderDetailPage() {
                 <div className="flex size-14 items-center justify-center rounded-full bg-brand/15 text-brand mb-3">
                   <CheckCircle2 className="size-8" />
                 </div>
-                <h3 className="text-base font-bold text-foreground">Escrow completed</h3>
+                <h3 className="text-base font-bold text-foreground">
+                  Escrow completed
+                </h3>
                 <p className="text-xs text-muted-foreground mt-1 max-w-xs">
-                 The funds have been transfarred to the seller and the account transfer is complete.
+                  The funds have been transferred to the seller and the account
+                  transfer is complete.
                 </p>
               </div>
             ) : (
@@ -249,36 +326,36 @@ export default function OrderDetailPage() {
                 <div className="flex size-14 items-center justify-center rounded-full bg-rose-500/15 text-rose-500 mb-3">
                   <AlertTriangle className="size-8" />
                 </div>
-                <h3 className="text-base font-bold text-rose-500">Dispute in Progress</h3>
+                <h3 className="text-base font-bold text-rose-500">
+                  Dispute in Progress
+                </h3>
                 <p className="text-xs text-muted-foreground mt-1 max-w-xs">
-                  The escrow is currently in dispute. Please wait for the resolution process to complete.
+                  The escrow is currently in dispute. Please wait for the
+                  resolution process to complete.
                 </p>
               </div>
             )}
           </div>
 
+          {/* Escrow details */}
           <div className="rounded-2xl border border-border bg-card p-6 shadow-sm flex flex-col justify-between">
             <div>
-              <h3 className="text-sm font-bold text-foreground mb-4">Escrow details</h3>
-
+              <h3 className="text-sm font-bold text-foreground mb-4">
+                Escrow details
+              </h3>
               <div className="space-y-3 text-xs">
                 <div className="flex items-center justify-between text-muted-foreground">
                   <span>Asset Price</span>
-                  <span className="font-mono font-medium text-foreground">{assetPrice.toFixed(2)} SOL</span>
+                  <span className="font-mono font-medium text-foreground">
+                    {assetPrice.toFixed(4)} SOL
+                  </span>
                 </div>
-                <div className="flex items-center justify-between text-muted-foreground">
-                  <span>Platform fee(%2.5)</span>
-                  <span className="font-mono font-medium text-foreground">{platformFee} SOL</span>
-                </div>
-                <div className="flex items-center justify-between text-muted-foreground">
-                  <span>Network fee</span>
-                  <span className="font-mono font-medium text-foreground">{networkFee} SOL</span>
-                </div>
-
                 <div className="border-t border-border pt-3">
                   <div className="flex items-center justify-between text-sm font-bold text-foreground">
                     <span>Total locked</span>
-                    <span className="font-mono text-base">{totalLocked} SOL</span>
+                    <span className="font-mono text-base">
+                      {assetPrice.toFixed(4)} SOL
+                    </span>
                   </div>
                 </div>
               </div>
@@ -286,8 +363,11 @@ export default function OrderDetailPage() {
 
             <div className="mt-6 rounded-xl border border-border/80 bg-muted/30 px-4 py-3 text-xs text-muted-foreground flex items-center justify-between">
               <span>
-               Seller: <strong className="font-semibold text-foreground">
-                  {selectedOrder.seller_pubkey ? selectedOrder.seller_pubkey.substring(0,6) + '...' : 'unknonw'}
+                Seller:{' '}
+                <strong className="font-semibold text-foreground">
+                  {selectedOrder.seller_pubkey
+                    ? `${selectedOrder.seller_pubkey.slice(0, 6)}...`
+                    : 'unknown'}
                 </strong>
               </span>
             </div>
@@ -302,11 +382,23 @@ export default function OrderDetailPage() {
           listingId={selectedOrder.id}
         />
 
+        {/* Action error */}
+        {actionError && (
+          <div className="rounded-xl bg-rose-500/10 border border-rose-500/30 p-3 text-xs font-medium text-rose-500 flex items-center gap-2">
+            <AlertTriangle className="size-4 shrink-0" />
+            <span>{actionError}</span>
+          </div>
+        )}
+
+        {/* Action buttons */}
         {!isCompleted && !isDisputed && (
           <div className="flex flex-col sm:flex-row sm:items-center justify-end gap-3 pt-2">
             <button
               type="button"
-              onClick={() => setIsDisputeOpen(true)}
+              onClick={() => {
+                setActionError(null);
+                setIsDisputeOpen(true);
+              }}
               className="rounded-xl border border-border bg-card px-5 py-2.5 text-xs font-semibold text-muted-foreground hover:text-rose-500 hover:border-rose-500/40 transition-colors"
             >
               Report a problem / dispute
@@ -326,7 +418,7 @@ export default function OrderDetailPage() {
               ) : (
                 <>
                   <CheckCircle2 className="size-4" />
-                  <span>Confirm & Release the funds</span>
+                  <span>Confirm &amp; Release the funds</span>
                 </>
               )}
             </button>
@@ -336,7 +428,10 @@ export default function OrderDetailPage() {
         {releasedSuccess && (
           <div className="rounded-xl bg-brand/10 border border-brand/30 p-4 text-center text-xs font-bold text-brand flex items-center justify-center gap-2">
             <CheckCircle2 className="size-4" />
-            <span>The funds have been transferred to the seller! Escrow transaction was completed on Solana.</span>
+            <span>
+              The funds have been transferred to the seller! Escrow transaction
+              was completed on Solana.
+            </span>
           </div>
         )}
       </div>
@@ -350,5 +445,3 @@ export default function OrderDetailPage() {
     </div>
   );
 }
-
-

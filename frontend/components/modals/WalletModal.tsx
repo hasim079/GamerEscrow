@@ -14,7 +14,7 @@ export function WalletModal({ isOpen, onClose }: WalletModalProps) {
 
   if (!isOpen) return null;
 
-  // İkon eşleştirmeleri için yardımcı bir nesne (popüler cüzdanlar için emojiler)
+  // Helper object for icon mapping (emojis for popular wallets)
   const getWalletIcon = (name: string) => {
     if (name.toLowerCase().includes('phantom')) return '👻';
     if (name.toLowerCase().includes('solflare')) return '🔥';

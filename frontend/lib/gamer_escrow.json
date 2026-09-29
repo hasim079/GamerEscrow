@@ -82,6 +82,10 @@
         },
         {
           "name": "escrow_vault",
+          "docs": [
+            "Vault kapatılıp lamports seller'a iade edilir.",
+            "Listed durumunda vault her zaman açıktır (create_listing'de init edildi)."
+          ],
           "writable": true,
           "pda": {
             "seeds": [
@@ -151,6 +155,28 @@
           }
         },
         {
+          "name": "escrow_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "listing_account"
+              }
+            ]
+          }
+        },
+        {
           "name": "seller",
           "writable": true,
           "signer": true
@@ -195,6 +221,10 @@
         },
         {
           "name": "initiator",
+          "docs": [
+            "Dispute başlatan kişi — alıcı veya satıcı olmalı (handler'da doğrulanıyor)."
+          ],
+          "writable": true,
           "signer": true
         }
       ],
@@ -223,6 +253,9 @@
         },
         {
           "name": "escrow_vault",
+          "docs": [
+            "Vault kapatılıp tüm lamports seller'a aktarılıyor (Anchor `close` constraint)."
+          ],
           "writable": true,
           "pda": {
             "seeds": [
@@ -244,12 +277,8 @@
           }
         },
         {
-          "name": "treasury",
-          "writable": true,
-          "address": "3trynVPFszVYU4UavqhUJpe1RyhkV5icAcmJ77mArNzP"
-        },
-        {
           "name": "buyer",
+          "writable": true,
           "signer": true
         },
         {
@@ -282,6 +311,9 @@
         },
         {
           "name": "escrow_vault",
+          "docs": [
+            "Vault kapatılıp tüm lamports winner'a aktarılıyor (Anchor `close` constraint)."
+          ],
           "writable": true,
           "pda": {
             "seeds": [
@@ -303,11 +335,6 @@
           }
         },
         {
-          "name": "treasury",
-          "writable": true,
-          "address": "3trynVPFszVYU4UavqhUJpe1RyhkV5icAcmJ77mArNzP"
-        },
-        {
           "name": "admin",
           "signer": true
         },
@@ -325,6 +352,19 @@
     }
   ],
   "accounts": [
+    {
+      "name": "EscrowVault",
+      "discriminator": [
+        54,
+        84,
+        41,
+        149,
+        160,
+        181,
+        85,
+        114
+      ]
+    },
     {
       "name": "ListingAccount",
       "discriminator": [
@@ -387,6 +427,13 @@
     }
   ],
   "types": [
+    {
+      "name": "EscrowVault",
+      "type": {
+        "kind": "struct",
+        "fields": []
+      }
+    },
     {
       "name": "ListingAccount",
       "type": {
