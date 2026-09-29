@@ -14,12 +14,13 @@ pub struct ListingAccount {
 }
 
 impl ListingAccount {
-    // The Anchor `space` parameter AUTOMATICALLY adds the 8-byte discriminator.
-    // This value is only the sum of the struct fields (excluding discriminator):
+    // The Anchor `space` parameter requires the 8-byte discriminator to be included MANUALLY.
+    // Anchor does NOT add it automatically — the full on-chain allocation must be:
+    // 8 (discriminator) + struct fields:
     // 32 (seller) + 1+32 (Option<buyer>) + 8 (price) + 32 (data_hash)
     // + 1 (status) + 8 (created_at) + 1 (bump) + 1 (vault_bump) + 8 (escrow_start_time)
-    // = 124 data bytes → Anchor adds +8 disc → on-chain: 132 bytes
-    pub const SPACE: usize = 32 + (1 + 32) + 8 + 32 + 1 + 8 + 1 + 1 + 8; // = 124
+    // = 8 + 124 = 132 bytes total
+    pub const SPACE: usize = 8 + 32 + (1 + 32) + 8 + 32 + 1 + 8 + 1 + 1 + 8; // = 132
 }
 
 #[derive(Debug, AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq)]

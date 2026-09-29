@@ -12,9 +12,50 @@ const RETRY_DELAY_MS = 800;
 const MAX_ATTEMPTS = 3;
 
 /**
+ * Runs simulateTransaction via RPC and throws a human-readable error
+ * if the simulation fails. This surfaces real Anchor error codes BEFORE
+ * Phantom gets a chance to show its generic "Unexpected error".
+ */
+async function simulateAndCheck(
+  connection: Connection,
+  tx: VersionedTransaction
+): Promise<void> {
+  const { value: simResult } = await connection.simulateTransaction(tx, {
+    commitment: "confirmed",
+  });
+
+  if (simResult.err) {
+    // Try to extract Anchor custom error code from logs
+    const logs = simResult.logs ?? [];
+    const anchorLog = logs.find(
+      (l) =>
+        l.includes("custom program error") ||
+        l.includes("AnchorError") ||
+        l.includes("Error Number")
+    );
+
+    if (anchorLog) {
+      // Extract readable message
+      throw new Error(`Simulation failed: ${anchorLog}`);
+    }
+
+    // Check for common error patterns in logs
+    const failLog = logs.find((l) => l.includes("failed:") || l.includes("Error:"));
+    if (failLog) {
+      throw new Error(`Simulation failed: ${failLog}`);
+    }
+
+    throw new Error(
+      `Transaction simulation failed: ${JSON.stringify(simResult.err)}\n\nLogs:\n${logs.slice(-5).join("\n")}`
+    );
+  }
+}
+
+/**
  * Helper function to create and send a VersionedTransaction via wallet adapter.
  *
  * - Fetches a fresh blockhash on every attempt (prevents expired blockhash errors).
+ * - Runs RPC simulation FIRST to surface real Anchor errors before Phantom.
  * - Automatically retries up to MAX_ATTEMPTS for Phantom port disconnect errors.
  * - Automatically prepends Compute Budget instructions.
  *
@@ -52,6 +93,24 @@ export async function buildAndSendVersionedTx(
 
   let lastErr: any = null;
 
+  // ── Step 1: RPC Simulation (once, before any Phantom interaction) ──────────
+  // This runs BEFORE asking Phantom to sign, so we get real Anchor error codes
+  // instead of Phantom's generic "Unexpected error".
+  try {
+    const simBlockhash = await connection.getLatestBlockhash("confirmed");
+    const simMessage = new TransactionMessage({
+      payerKey: publicKey,
+      recentBlockhash: simBlockhash.blockhash,
+      instructions: allInstructions,
+    }).compileToV0Message();
+    const simTx = new VersionedTransaction(simMessage);
+    await simulateAndCheck(connection, simTx);
+  } catch (simErr: any) {
+    // Surface simulation errors immediately — no point asking Phantom to sign
+    throw simErr;
+  }
+
+  // ── Step 2: Send via Phantom (skipPreflight=true since we already simulated) ─
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     try {
       // Fresh blockhash on every attempt — no expired blockhash on retry
@@ -65,9 +124,9 @@ export async function buildAndSendVersionedTx(
 
       const tx = new VersionedTransaction(messageV0);
 
-      // skipPreflight: false → catch errors during simulation phase
+      // skipPreflight: true — we already simulated above, avoid double simulation
       const signature = await sendTransaction(tx, connection, {
-        skipPreflight: false,
+        skipPreflight: true,
         preflightCommitment: "confirmed",
       });
 
@@ -75,16 +134,6 @@ export async function buildAndSendVersionedTx(
     } catch (err: any) {
       lastErr = err;
       const msg = (err?.message || "").toLowerCase();
-
-      // Throw simulation error directly — do not retry
-      if (
-        msg.includes("simulation failed") ||
-        msg.includes("transaction simulation") ||
-        msg.includes("custom program error") ||
-        msg.includes("0x") // Anchor custom error hex code
-      ) {
-        throw err;
-      }
 
       // User rejection → throw directly
       if (msg.includes("rejected") || msg.includes("user denied")) {

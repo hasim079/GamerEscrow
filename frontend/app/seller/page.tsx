@@ -79,9 +79,9 @@ export default function SellerDashboardPage() {
     if (file) {
       const fileExt = file.name.split('.').pop();
       const fileName = `${activeDispute.id}_seller_${Date.now()}.${fileExt}`;
-      const { data, error } = await supabase.storage.from('disputes').upload(fileName, file);
+      const { data, error } = await supabase.storage.from('dispute').upload(fileName, file);
       if (!error && data) {
-        const { data: { publicUrl } } = supabase.storage.from('disputes').getPublicUrl(data.path);
+        const { data: { publicUrl } } = supabase.storage.from('dispute').getPublicUrl(data.path);
         evidenceUrl = publicUrl;
       } else {
         console.warn('File upload failed', error);

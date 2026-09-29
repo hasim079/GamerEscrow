@@ -83,8 +83,8 @@
         {
           "name": "escrow_vault",
           "docs": [
-            "Vault kapatılıp lamports seller'a iade edilir.",
-            "Listed durumunda vault her zaman açıktır (create_listing'de init edildi)."
+            "Vault is closed and lamports are returned to the seller.",
+            "In Listed state, the vault is always open (initialized in create_listing)."
           ],
           "writable": true,
           "pda": {
@@ -222,7 +222,7 @@
         {
           "name": "initiator",
           "docs": [
-            "Dispute başlatan kişi — alıcı veya satıcı olmalı (handler'da doğrulanıyor)."
+            "The person initiating the dispute — must be the buyer or seller (validated in the handler)."
           ],
           "writable": true,
           "signer": true
@@ -254,7 +254,7 @@
         {
           "name": "escrow_vault",
           "docs": [
-            "Vault kapatılıp tüm lamports seller'a aktarılıyor (Anchor `close` constraint)."
+            "Vault is closed and all lamports are transferred to the seller (Anchor `close` constraint)."
           ],
           "writable": true,
           "pda": {
@@ -312,7 +312,7 @@
         {
           "name": "escrow_vault",
           "docs": [
-            "Vault kapatılıp tüm lamports winner'a aktarılıyor (Anchor `close` constraint)."
+            "Vault is closed and all lamports are transferred to the winner (Anchor `close` constraint)."
           ],
           "writable": true,
           "pda": {

@@ -14,7 +14,7 @@ const supabaseAdmin = createClient(supabaseUrl, supabaseServiceRole, {
 });
 
 // Canonical bucket name — must match the bucket created in Supabase Dashboard
-const DISPUTE_BUCKET = 'dispute-evidence';
+const DISPUTE_BUCKET = 'dispute';
 
 export async function POST(request: Request) {
   try {
